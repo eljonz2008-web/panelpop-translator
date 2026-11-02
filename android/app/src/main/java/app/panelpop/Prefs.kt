@@ -18,7 +18,7 @@ class Prefs(ctx: Context) {
 
     /** Opacidad del fondo 0–255 */
     var bgAlpha: Int
-        get() = p.getInt("alpha", 230)
+        get() = p.getInt("alpha", 215)
         set(v) = p.edit().putInt("alpha", v).apply()
 
     /** true = cubre el texto original; false = etiqueta debajo del texto */
