@@ -36,6 +36,11 @@ class Prefs(ctx: Context) {
         get() = p.getInt("perf", 1)
         set(v) = p.edit().putInt("perf", v).apply()
 
-    val intervalMs: Long get() = when (performance) { 0 -> 1500L; 2 -> 450L; else -> 800L }
+    /** Segundos entre lecturas de pantalla (0.5 – 10). Las traducciones se mantienen fijas entre lecturas. */
+    var refreshSec: Float
+        get() = p.getFloat("refresh", 2f)
+        set(v) = p.edit().putFloat("refresh", v).apply()
+
+    val intervalMs: Long get() = (refreshSec * 1000).toLong().coerceAtLeast(500L)
     val captureScale: Float get() = when (performance) { 0 -> 0.5f; 2 -> 0.85f; else -> 0.65f }
 }
