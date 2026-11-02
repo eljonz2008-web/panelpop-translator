@@ -128,23 +128,37 @@ class TranslatorService : Service() {
         }
     }
 
-    /** Oculta la capa un instante para no "leer" nuestras propias traducciones. */
+    /** Sin ocultar la capa: así el texto traducido nunca parpadea. */
     private fun tick() {
         busy = true
-        overlay?.visibility = View.INVISIBLE
-        main.postDelayed({
-            val img = try { reader?.acquireLatestImage() } catch (e: Exception) { null }
-            overlay?.visibility = View.VISIBLE
-            if (img == null) { busy = false; return@postDelayed }
-            val plane = img.planes[0]
-            val rowPad = plane.rowStride - plane.pixelStride * img.width
-            val bmpFull = Bitmap.createBitmap(img.width + rowPad / plane.pixelStride, img.height, Bitmap.Config.ARGB_8888)
-            bmpFull.copyPixelsFromBuffer(plane.buffer)
-            img.close()
-            val bmp = Bitmap.createBitmap(bmpFull, 0, 0, reader!!.width, reader!!.height)
-            if (bmp !== bmpFull) bmpFull.recycle()
-            worker.execute { process(bmp) }
-        }, 70)
+        val img = try { reader?.acquireLatestImage() } catch (e: Exception) { null }
+        if (img == null) { busy = false; return }
+        val plane = img.planes[0]
+        val rowPad = plane.rowStride - plane.pixelStride * img.width
+        val bmpFull = Bitmap.createBitmap(img.width + rowPad / plane.pixelStride, img.height, Bitmap.Config.ARGB_8888)
+        bmpFull.copyPixelsFromBuffer(plane.buffer)
+        img.close()
+        val bmp = Bitmap.createBitmap(bmpFull, 0, 0, reader!!.width, reader!!.height)
+        if (bmp !== bmpFull) bmpFull.recycle()
+        worker.execute { process(bmp) }
+    }
+
+    @Volatile private var shown: List<TranslatedBlock> = emptyList()
+    private fun norm(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
+
+    /** ¿Este texto es nuestra propia traducción leída por el OCR? */
+    private fun ownText(raw: String, box: Rect): TranslatedBlock? {
+        val n = norm(raw); if (n.isEmpty()) return null
+        return shown.firstOrNull { b ->
+            val m = norm(b.text)
+            m.isNotEmpty() && (m.contains(n) || n.contains(m) ||
+                (Rect.intersects(b.box, box) && common(m, n) > 0.6f))
+        }
+    }
+    private fun common(a: String, b: String): Float {
+        val sa = a.windowed(2).toSet(); val sb = b.windowed(2).toSet()
+        if (sa.isEmpty() || sb.isEmpty()) return 0f
+        return sa.intersect(sb).size.toFloat() / minOf(sa.size, sb.size)
     }
 
     /** Firma 24x24 en escala de grises para saltar fotogramas sin cambios. */
@@ -189,18 +203,23 @@ class TranslatorService : Service() {
     private fun process(bmp: Bitmap) {
         try {
             val sig = signature(bmp)
-            if (!changed(lastSig, sig)) return // pantalla igual → no repetir OCR
+            if (!active || !changed(lastSig, sig)) return // pantalla igual → no repetir OCR
             lastSig = sig
 
             val pref = prefs.sourceLang
             val text = Tasks.await(recognizer(if (pref == "auto") "ja" else pref).process(InputImage.fromBitmap(bmp, 0)))
             val inv = 1f / scale
             val out = ArrayList<TranslatedBlock>()
+            val kept = HashSet<TranslatedBlock>()
             for (block in text.textBlocks) {
-                val box = block.boundingBox ?: continue
+                val box0 = block.boundingBox ?: continue
+                val box = Rect((box0.left * inv).toInt(), (box0.top * inv).toInt(),
+                    (box0.right * inv).toInt(), (box0.bottom * inv).toInt())
                 // Unir líneas del globo; en CJK sin espacios
                 val raw = block.lines.joinToString(" ") { it.text }.trim()
                 if (raw.length < 2 || raw.all { !it.isLetter() }) continue
+                val own = ownText(raw, box)
+                if (own != null) { if (kept.add(own)) out.add(own); continue }
                 val src = if (pref == "auto") {
                     val l = Tasks.await(langId.identifyLanguage(raw))
                     if (l == "und") "en" else l
@@ -210,11 +229,9 @@ class TranslatorService : Service() {
                     val r = if (t == null) raw else Tasks.await(t.translate(raw))
                     cache.put("$src|$raw", r); r
                 }
-                val r = Rect((box.left * inv).toInt(), (box.top * inv).toInt(),
-                    (box.right * inv).toInt(), (box.bottom * inv).toInt())
-                out.add(TranslatedBlock(r, translated))
+                out.add(TranslatedBlock(box, translated))
             }
-            main.post { overlay?.setBlocks(out) }
+            main.post { if (active) { shown = out; overlay?.setBlocks(out) } }
         } catch (e: Exception) {
             android.util.Log.e("PanelPop", "process", e)
         } finally {
@@ -250,7 +267,7 @@ class TranslatorService : Service() {
             setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
             background = android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(Color.rgb(255, 92, 57)); setStroke((3 * d).toInt(), Color.WHITE)
+                setColor(if (active) Color.rgb(255, 92, 57) else Color.GRAY); setStroke((3 * d).toInt(), Color.WHITE)
             }
         }
         val size = (56 * d).toInt()
@@ -264,7 +281,8 @@ class TranslatorService : Service() {
                 MotionEvent.ACTION_DOWN -> { sx = lp.x; sy = lp.y; tx = e.rawX; ty = e.rawY; moved = false; downAt = e.eventTime }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - tx; val dy = e.rawY - ty
-                    if (abs(dx) > 10 || abs(dy) > 10) moved = true
+                    if (abs(dx) > 12 * d || abs(dy) > 12 * d) moved = true
+                    if (!moved) return@setOnTouchListener true
                     lp.x = sx + dx.toInt(); lp.y = sy + dy.toInt(); wm.updateViewLayout(b, lp)
                 }
                 MotionEvent.ACTION_UP -> if (!moved) {
@@ -281,7 +299,8 @@ class TranslatorService : Service() {
         active = a
         bubble?.alpha = if (a) 1f else 0.45f
         bubble?.text = if (a) "ES" else "II"
-        if (!a) overlay?.setBlocks(emptyList()) else lastSig = null
+        if (!a) { shown = emptyList(); overlay?.setBlocks(emptyList()) }
+        lastSig = null
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(1, buildNotification())
     }
 
