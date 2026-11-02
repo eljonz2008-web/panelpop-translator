@@ -298,7 +298,9 @@ class TranslatorService : Service() {
     private fun setActive(a: Boolean) {
         active = a
         bubble?.alpha = if (a) 1f else 0.45f
-        bubble?.text = if (a) "ES" else "II"
+        bubble?.text = if (a) "ES" else "▶"
+        (bubble?.background as? android.graphics.drawable.GradientDrawable)?.setColor(if (a) Color.rgb(255, 92, 57) else Color.DKGRAY)
+        android.widget.Toast.makeText(this, if (a) "Traductor reanudado" else "Traductor en pausa", android.widget.Toast.LENGTH_SHORT).show()
         if (!a) { shown = emptyList(); overlay?.setBlocks(emptyList()) }
         lastSig = null
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(1, buildNotification())
